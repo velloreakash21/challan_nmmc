@@ -1,0 +1,19 @@
+rules_version = '2';
+service firebase.storage {
+  match /b/{bucket}/o {
+    match /qr-codes/{fileName} {
+      allow read: if true; // QR codes can be publicly accessible
+      allow write: if request.auth != null;
+    }
+    
+    match /challan-photos/{challanId}/{fileName} {
+      allow read: if request.auth != null;
+      allow write: if request.auth != null;
+    }
+    
+    match /receipts/{fileName} {
+      allow read: if request.auth != null;
+      allow write: if request.auth != null;
+    }
+  }
+} 

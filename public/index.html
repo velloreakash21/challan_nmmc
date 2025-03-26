@@ -1,0 +1,518 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Challan System</title>
+    <script src="https://www.gstatic.com/firebasejs/10.8.0/firebase-app-compat.js"></script>
+    <script src="https://www.gstatic.com/firebasejs/10.8.0/firebase-auth-compat.js"></script>
+    <script src="https://www.gstatic.com/firebasejs/10.8.0/firebase-functions-compat.js"></script>
+    <script src="https://www.gstatic.com/firebasejs/10.8.0/firebase-firestore-compat.js"></script>
+    <script src="https://www.gstatic.com/firebasejs/10.8.0/firebase-storage-compat.js"></script>
+</head>
+<body>
+    <h1>Challan System</h1>
+    <div id="app">
+        <div id="auth-section">
+            <h2>Authentication</h2>
+            <div id="phone-auth">
+                <input type="text" id="auth-phone" placeholder="Enter phone number (+91...)">
+                <button onclick="sendOTP()">Send OTP</button>
+                <div id="recaptcha-container"></div>
+                <div id="otp-section" style="display: none;">
+                    <input type="text" id="otp-code" placeholder="Enter OTP">
+                    <button onclick="verifyOTP()">Verify OTP</button>
+                </div>
+            </div>
+        </div>
+
+        <div id="challan-section" style="display: none;">
+            <h2>Create Challan</h2>
+            <form id="challan-form">
+                <select id="challan-type">
+                    <option value="person">Person</option>
+                    <option value="shop">Shop</option>
+                </select>
+                <input type="text" id="challan-name" placeholder="Name">
+                <input type="text" id="challan-phone" placeholder="Phone">
+                <input type="number" id="penalty" placeholder="Penalty Amount">
+                <input type="text" id="reason" placeholder="Reason">
+                <textarea id="remarks" placeholder="Remarks"></textarea>
+                <select id="payment-type">
+                    <option value="cash">Cash</option>
+                    <option value="online">Online</option>
+                </select>
+                <button type="submit">Create Challan</button>
+            </form>
+        </div>
+
+        <div id="challans-list" style="display: none;">
+            <h2>Your Challans</h2>
+            <div id="challans-container"></div>
+        </div>
+    </div>
+
+    <script>
+        // Your Firebase configuration
+        const firebaseConfig = {
+            apiKey: "AIzaSyC1H3VJa-8TKq0MLvaQxfxdJMwXdKqUcFE",
+            authDomain: "dm-pro-fa4d9.firebaseapp.com",
+            projectId: "dm-pro-fa4d9",
+            storageBucket: "dm-pro-fa4d9.firebasestorage.app",
+            messagingSenderId: "6642123614",
+            appId: "1:6642123614:web:be8bd0bc91aac757007f17",
+            measurementId: "G-FW8JKTWDXE"
+        };
+
+        // Initialize Firebase
+        firebase.initializeApp(firebaseConfig);
+
+        // Get Firebase service instances
+        const auth = firebase.auth();
+        const functions = firebase.functions();
+        const db = firebase.firestore();
+        const storage = firebase.storage();
+
+        let confirmationResult = null;
+
+        // Auth state observer
+        auth.onAuthStateChanged((user) => {
+            if (user) {
+                // User is signed in
+                console.log('[Auth] User signed in:', {
+                    uid: user.uid,
+                    phoneNumber: user.phoneNumber,
+                    isAnonymous: user.isAnonymous,
+                    providerData: user.providerData,
+                    refreshToken: user.refreshToken
+                });
+                
+                // Create user account if it doesn't exist
+                const createTestUser = firebase.functions().httpsCallable('createUserAccount');
+                createTestUser({
+                    name: 'Test User',
+                    email: 'test@example.com',
+                    phone: user.phoneNumber || '+919490258654'
+                }).then(() => {
+                    console.log('[Auth] User account created/updated successfully');
+                    // Show the challan sections
+                    document.getElementById('auth-section').style.display = 'none';
+                    document.getElementById('challan-section').style.display = 'block';
+                    document.getElementById('challans-list').style.display = 'block';
+                    loadChallans();
+                }).catch(error => {
+                    console.error('[Auth] Error creating/updating user account:', error);
+                    // Check if the error is due to unauthenticated state
+                    if (error.code === 'unauthenticated') {
+                        // Force refresh the token
+                        return user.getIdToken(true).then(() => {
+                            // Retry creating user account
+                            return createTestUser({
+                                name: 'Test User',
+                                email: 'test@example.com',
+                                phone: user.phoneNumber || '+919490258654'
+                            });
+                        });
+                    }
+                    alert('Error setting up user account: ' + error.message);
+                });
+            } else {
+                // User is signed out
+                console.log('[Auth] User signed out');
+                document.getElementById('auth-section').style.display = 'block';
+                document.getElementById('challan-section').style.display = 'none';
+                document.getElementById('challans-list').style.display = 'none';
+            }
+        });
+
+        // Phone Authentication
+        let recaptchaVerifier;
+
+        // Initialize recaptcha when the page loads
+        window.onload = function() {
+            recaptchaVerifier = new firebase.auth.RecaptchaVerifier('recaptcha-container', {
+                'size': 'normal',
+                'callback': (response) => {
+                    // Enable the send OTP button when reCAPTCHA is solved
+                    document.querySelector('button[onclick="sendOTP()"]').removeAttribute('disabled');
+                },
+                'expired-callback': () => {
+                    // Disable the send OTP button when reCAPTCHA expires
+                    document.querySelector('button[onclick="sendOTP()"]').setAttribute('disabled', 'true');
+                    // Reset the reCAPTCHA
+                    recaptchaVerifier.render().then(function(widgetId) {
+                        grecaptcha.reset(widgetId);
+                    });
+                }
+            });
+            recaptchaVerifier.render();
+        }
+
+        function sendOTP() {
+            const phoneNumber = document.getElementById('auth-phone').value.trim();
+            
+            // Basic phone number validation
+            if (!phoneNumber.match(/^\+91\d{10}$/)) {
+                alert('Please enter a valid phone number in the format: +91XXXXXXXXXX');
+                return;
+            }
+
+            // Disable the send OTP button
+            document.querySelector('button[onclick="sendOTP()"]').setAttribute('disabled', 'true');
+
+            // For test number, show OTP section immediately
+            if (phoneNumber === '+919490258654') {
+                // For test number, create a test verification ID
+                const testVerificationId = 'test-verification-' + Date.now();
+                // Store verification ID
+                window.localStorage.setItem('verificationId', testVerificationId);
+                // Show OTP section
+                document.getElementById('otp-section').style.display = 'block';
+                alert('Test OTP sent! Use 123456 to verify.');
+                return;
+            }
+
+            auth.signInWithPhoneNumber(phoneNumber, recaptchaVerifier)
+                .then((result) => {
+                    confirmationResult = result;
+                    document.getElementById('otp-section').style.display = 'block';
+                    alert('OTP sent successfully! Please check your phone.');
+                })
+                .catch((error) => {
+                    console.error('Error sending OTP:', error);
+                    let errorMessage = 'Error sending OTP: ';
+                    switch (error.code) {
+                        case 'auth/invalid-phone-number':
+                            errorMessage += 'Invalid phone number format.';
+                            break;
+                        case 'auth/missing-phone-number':
+                            errorMessage += 'Phone number is required.';
+                            break;
+                        case 'auth/quota-exceeded':
+                            errorMessage += 'SMS quota exceeded. Please try again later.';
+                            break;
+                        case 'auth/user-disabled':
+                            errorMessage += 'This phone number has been disabled.';
+                            break;
+                        case 'auth/operation-not-allowed':
+                            errorMessage += 'Phone authentication is not enabled. Please contact support.';
+                            break;
+                        default:
+                            errorMessage += error.message;
+                    }
+                    alert(errorMessage);
+                    
+                    // Reset reCAPTCHA on error
+                    recaptchaVerifier.render().then(function(widgetId) {
+                        grecaptcha.reset(widgetId);
+                    });
+                    
+                    // Re-enable the send OTP button
+                    document.querySelector('button[onclick="sendOTP()"]').removeAttribute('disabled');
+                });
+        }
+
+        function verifyOTP() {
+            const code = document.getElementById('otp-code').value.trim();
+            const phoneNumber = document.getElementById('auth-phone').value.trim();
+            
+            // Basic OTP validation
+            if (!code.match(/^\d{6}$/)) {
+                alert('Please enter a valid 6-digit OTP');
+                return;
+            }
+
+            // Disable verify button
+            document.querySelector('button[onclick="verifyOTP()"]').setAttribute('disabled', 'true');
+
+            // For test number and code
+            if (phoneNumber === '+919490258654' && code === '123456') {
+                const verificationId = window.localStorage.getItem('verificationId');
+                if (!verificationId) {
+                    alert('Please request OTP first');
+                    document.querySelector('button[onclick="verifyOTP()"]').removeAttribute('disabled');
+                    return;
+                }
+
+                // Create credential
+                const credential = firebase.auth.PhoneAuthProvider.credential(verificationId, code);
+                
+                // Sign in with credential
+                auth.signInWithCredential(credential)
+                    .then((result) => {
+                        console.log('[Auth] Test user signed in:', result.user);
+                        // Force token refresh
+                        return result.user.getIdToken(true);
+                    })
+                    .then((token) => {
+                        console.log('[Auth] Got fresh token');
+                        // Create user account if it doesn't exist
+                        const createTestUser = firebase.functions().httpsCallable('createUserAccount');
+                        return createTestUser({
+                            name: 'Test User',
+                            email: 'test@example.com',
+                            phone: phoneNumber
+                        });
+                    })
+                    .then(() => {
+                        console.log('[Auth] User account created/updated');
+                        // Clear verification ID
+                        window.localStorage.removeItem('verificationId');
+                        // Show success message
+                        alert('Test user authenticated successfully!');
+                        // Show the challan sections
+                        document.getElementById('auth-section').style.display = 'none';
+                        document.getElementById('challan-section').style.display = 'block';
+                        document.getElementById('challans-list').style.display = 'block';
+                        loadChallans();
+                    })
+                    .catch((error) => {
+                        console.error('[Auth] Error verifying test user:', error);
+                        alert('Error verifying test user: ' + error.message);
+                        // Re-enable verify button
+                        document.querySelector('button[onclick="verifyOTP()"]').removeAttribute('disabled');
+                    });
+                return;
+            }
+
+            // For regular verification
+            confirmationResult.confirm(code)
+                .then((result) => {
+                    const user = result.user;
+                    // Create user account if it doesn't exist
+                    const createTestUser = firebase.functions().httpsCallable('createUserAccount');
+                    return createTestUser({
+                        name: 'Test User',
+                        email: 'test@example.com',
+                        phone: user.phoneNumber
+                    });
+                })
+                .then(() => {
+                    // Show the challan sections after successful authentication
+                    document.getElementById('auth-section').style.display = 'none';
+                    document.getElementById('challan-section').style.display = 'block';
+                    document.getElementById('challans-list').style.display = 'block';
+                    loadChallans();
+                })
+                .catch((error) => {
+                    console.error('Error verifying OTP:', error);
+                    let errorMessage = 'Error verifying OTP: ';
+                    switch (error.code) {
+                        case 'auth/invalid-verification-code':
+                            errorMessage += 'Invalid OTP code.';
+                            break;
+                        case 'auth/code-expired':
+                            errorMessage += 'OTP has expired. Please request a new one.';
+                            break;
+                        default:
+                            errorMessage += error.message;
+                    }
+                    alert(errorMessage);
+                    
+                    // Re-enable verify button
+                    document.querySelector('button[onclick="verifyOTP()"]').removeAttribute('disabled');
+                });
+        }
+
+        // Create Challan
+        document.getElementById('challan-form').addEventListener('submit', async (e) => {
+            e.preventDefault();
+            
+            try {
+                // Check if user is authenticated
+                const user = auth.currentUser;
+                if (!user) {
+                    console.error('[Challan] No authenticated user found');
+                    throw new Error('User must be authenticated');
+                }
+
+                // Force token refresh before proceeding
+                const token = await user.getIdToken(true);
+                console.log('[Challan] Got fresh token:', token.substring(0, 10) + '...');
+
+                console.log('[Challan] Current user:', {
+                    uid: user.uid,
+                    phoneNumber: user.phoneNumber,
+                    isAnonymous: user.isAnonymous,
+                    emailVerified: user.emailVerified,
+                    providerData: user.providerData
+                });
+
+                // Get form values
+                const type = document.getElementById('challan-type').value;
+                const name = document.getElementById('challan-name').value.trim();
+                const phone = document.getElementById('challan-phone').value.trim();
+                const penalty = Number(document.getElementById('penalty').value);
+                const reason = document.getElementById('reason').value.trim();
+                const remarks = document.getElementById('remarks').value.trim();
+                const paymentType = document.getElementById('payment-type').value;
+
+                // Validate required fields
+                if (!name) {
+                    alert('Name is required');
+                    return;
+                }
+                if (!phone) {
+                    alert('Phone number is required');
+                    return;
+                }
+                if (!penalty || penalty <= 0) {
+                    alert('Penalty amount is required and must be greater than 0');
+                    return;
+                }
+                if (!reason) {
+                    alert('Reason is required');
+                    return;
+                }
+                if (!paymentType) {
+                    alert('Payment type is required');
+                    return;
+                }
+
+                const data = {
+                    name,
+                    phone,
+                    penalty,
+                    reason,
+                    remarks,
+                    paymentType
+                };
+
+                console.log('[Challan] Sending data:', data);
+
+                // Get the function reference
+                const createChallan = type === 'person' 
+                    ? firebase.functions().httpsCallable('createPersonChallan')
+                    : firebase.functions().httpsCallable('createShopChallan');
+
+                // Call the function
+                console.log('[Challan] Calling Cloud Function...');
+                const result = await createChallan(data);
+                console.log('[Challan] Function result:', result);
+                
+                if (result.data && result.data.success) {
+                    console.log('[Challan] Successfully created challan:', result.data.challanId);
+                    alert('Challan created successfully!');
+                    // Reset form
+                    e.target.reset();
+                    // Reload challans list
+                    loadChallans();
+                } else {
+                    console.error('[Challan] Function returned error:', result.data);
+                    throw new Error(result.data?.error || 'Failed to create challan');
+                }
+            } catch (error) {
+                console.error('[Challan] Error creating challan:', error);
+                // Check specific error types
+                if (error.code === 'unauthenticated' || error.message.includes('authenticated')) {
+                    console.log('[Challan] Attempting to refresh auth state...');
+                    // Force user to re-authenticate
+                    auth.signOut().then(() => {
+                        alert('Session expired. Please sign in again.');
+                        document.getElementById('auth-section').style.display = 'block';
+                        document.getElementById('challan-section').style.display = 'none';
+                        document.getElementById('challans-list').style.display = 'none';
+                    });
+                } else {
+                    alert('Error creating challan: ' + error.message);
+                }
+            }
+        });
+
+        // Load Challans
+        async function loadChallans() {
+            try {
+                const getUserChallans = functions.httpsCallable('getUserChallans');
+                const result = await getUserChallans({ type: 'all', limit: 10 });
+                
+                const container = document.getElementById('challans-container');
+                container.innerHTML = '';
+                
+                result.data.challans.forEach(challan => {
+                    container.innerHTML += `
+                        <div class="challan-card">
+                            <h3>Challan ID: ${challan.challanId}</h3>
+                            <p>Type: ${challan.type}</p>
+                            <p>Name: ${challan.name}</p>
+                            <p>Amount: ₹${challan.penalty}</p>
+                            <p>Status: ${challan.paymentStatus}</p>
+                            ${challan.paymentStatus === 'pending' && challan.paymentType === 'online' 
+                                ? `<button onclick="initiatePayment('${challan.challanId}', ${challan.penalty})">Pay Now</button>`
+                                : ''}
+                        </div>
+                    `;
+                });
+            } catch (error) {
+                console.error('Error loading challans:', error);
+                alert('Error loading challans: ' + error.message);
+            }
+        }
+
+        // Initiate Payment
+        async function initiatePayment(challanId, amount) {
+            try {
+                const initiatePayment = functions.httpsCallable('initiatePayment');
+                const result = await initiatePayment({
+                    challanId,
+                    amount,
+                    paymentMethod: 'card'
+                });
+                
+                // Redirect to payment gateway URL
+                window.location.href = result.data.paymentGatewayUrl;
+            } catch (error) {
+                console.error('Error initiating payment:', error);
+                alert('Error initiating payment: ' + error.message);
+            }
+        }
+    </script>
+
+    <style>
+        .challan-card {
+            border: 1px solid #ccc;
+            padding: 15px;
+            margin: 10px 0;
+            border-radius: 5px;
+        }
+
+        #app {
+            max-width: 800px;
+            margin: 0 auto;
+            padding: 20px;
+        }
+
+        input, select, textarea {
+            display: block;
+            width: 100%;
+            margin: 10px 0;
+            padding: 8px;
+        }
+
+        button {
+            background-color: #4CAF50;
+            color: white;
+            padding: 10px 20px;
+            border: none;
+            border-radius: 5px;
+            cursor: pointer;
+        }
+
+        button:hover {
+            background-color: #45a049;
+        }
+
+        #recaptcha-container {
+            margin: 20px 0;
+            min-height: 65px;
+        }
+
+        #phone-auth {
+            margin-bottom: 30px;
+        }
+
+        #otp-section {
+            margin-top: 20px;
+        }
+    </style>
+</body>
+</html> 
