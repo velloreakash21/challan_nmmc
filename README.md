@@ -1,4 +1,6 @@
-# Challan System
+# challan_nmmc
+
+## About
 
 A web-based challan management system built with Firebase and JavaScript.
 
