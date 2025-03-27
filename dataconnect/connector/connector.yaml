@@ -1,6 +1,0 @@
-connectorId: default
-generate:
-  javascriptSdk:
-    outputDir: ../../challan-system/dataconnect-generated/js/default-connector
-    package: "@firebasegen/default-connector"
-    packageJsonDir: ../../challan-system
